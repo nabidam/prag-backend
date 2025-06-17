@@ -14,7 +14,19 @@ from time import sleep
 import shutil
 import re
 
+from sqlmodel import Session, SQLModel, create_engine, Field, select, func, text, update, Relationship
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from typing import Annotated
+from fastapi import Depends, Body
+
 load_dotenv()
+
+
+# -------------- LOGGING -------------- #
 
 log_dir = "logs"
 
@@ -44,18 +56,66 @@ log_file_handler.setFormatter(formatter)
 # Add the handler to the logger
 logger.addHandler(log_file_handler)
 
+
+# -------------- INIT -------------- #
+
 # Use your own values from my.telegram.org
-api_id = os.getenv("API_ID")
-api_hash = os.getenv("API_HASH")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+
+DB_USER = os.environ.get("DB_USER")
+DB_USER_PASS = os.environ.get("DB_USER_PASS")
+DB_HOST = os.environ.get("DB_HOST")
+DB_PORT = os.environ.get("DB_PORT")
+DB_DATABASE = os.environ.get("DB_DATABASE")
+DB_URI = f"mysql+mysqlconnector://{DB_USER}:{
+    DB_USER_PASS}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
 
 
-# Regex pattern for Telegram proxy links
-proxy_pattern = re.compile(r'https://t\.me/proxy\?server=[^\s]+')
+# -------------- MODELS -------------- #
+
+class TGProxy(SQLModel, table=True):
+    __tablename__ = "tg_proxies"
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    msg_id: str = Field(unique=True, nullable=False)
+    sender_id: str = Field(unique=True, nullable=False)
+    raw_msg: str | None = None
+    msg: str | None = None
+    proxy: str | None = None
+    likes: int = Field(default=0)
+    dislikes: int = Field(default=0)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+engine = create_engine(DB_URI, echo=True)
+
+
+def init_db():
+    SQLModel.metadata.create_all(engine)
+
+
+def get_db():
+    with Session(engine) as session:
+        try:
+            yield session
+        finally:
+            session.close()
+
+
+# -------------- TG CLIENT -------------- #
+
 
 # Create the client
 client = TelegramClient(
-    "session_name", api_id, api_hash, proxy=("socks5", "127.0.0.1", 1080)
+    "session_name", API_ID, API_HASH, proxy=("socks5", "127.0.0.1", 1080)
 )
+
+
+# -------------- MISC -------------- #
+
+# Regex pattern for Telegram proxy links
+proxy_pattern = re.compile(r'https://t\.me/proxy\?server=[^\s]+')
 
 
 @client.on(events.NewMessage)
@@ -64,19 +124,66 @@ async def proxy_listener_handler(event):
     matches = proxy_pattern.findall(message)
     for link in matches:
         try:
+            print(event)
+            print(event.message)
+            print(event.sender_id)
             # TODO: store in db
             print(f"Stored proxy link: {link}")
         except Exception as e:
             print(f"Failed to store link: {link}\nError: {e}")
 
 
-async def main():
+# -------------- APP -------------- #
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+
     await client.start()
-    logger.info("Connected to Telegram API")
-
     await client.run_until_disconnected()
-    # logger.info("Group history fetched successfully")
+    yield
+    await client.disconnect()
 
 
-with client:
-    client.loop.run_until_complete(main())
+app = FastAPI(lifespan=lifespan)
+
+
+origins = [
+    # "https://divineaty.navidam.ir",
+    # "https://faalosher.navidam.ir",
+    # "https://faalosher.creativeaty.club",
+    # "http://localhost",
+    # "http://localhost:5173",
+    "*"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DependsDB = Annotated[Session, Depends(get_db)]
+
+
+# -------------- ROUTES -------------- #
+
+
+@app.get("/")
+def read_root():
+    return {"Hello": "World"}
+
+
+# async def main():
+#     await client.start()
+#     logger.info("Connected to Telegram API")
+
+#     await client.run_until_disconnected()
+#     # logger.info("Group history fetched successfully")
+
+
+# with client:
+#     client.loop.run_until_complete(main())
